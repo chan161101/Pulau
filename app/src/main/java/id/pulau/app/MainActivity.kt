@@ -78,6 +78,43 @@ class MainActivity : Activity() {
             }
         })
 
+        root.addView(tv("Penyesuaian posisi notch", 16f, true))
+        root.addView(
+            tv(
+                "Notch mencoba menyesuaikan diri dengan kamera depan secara otomatis. Kalau celah tengahnya belum pas, " +
+                    "atur manual di sini. Perubahan langsung terlihat di notch (aktifkan Pulau dulu).",
+                12f
+            )
+        )
+        val refreshers = mutableListOf<() -> Unit>()
+        fun stepper(title: String, key: String, start: Int, step: Int, min: Int, max: Int): LinearLayout {
+            val label = tv("", 14f)
+            fun show() {
+                val v = prefs.getInt(key, 0)
+                label.text = title + ": " + (if (v == 0) "otomatis" else "$v")
+            }
+            show()
+            refreshers.add { show() }
+            fun change(delta: Int) {
+                val v = prefs.getInt(key, 0)
+                val base = if (v == 0) start else v
+                prefs.edit().putInt(key, (base + delta).coerceIn(min, max)).apply()
+                show()
+            }
+            return LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(label, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                addView(btn("-") { change(-step) })
+                addView(btn("+") { change(step) })
+            }
+        }
+        root.addView(stepper("Lebar area kamera (dp)", "cut_w_dp", 48, 2, 20, 140))
+        root.addView(stepper("Tinggi baris notch (dp)", "cut_h_dp", 30, 1, 20, 60))
+        root.addView(btn("Kembali ke otomatis") {
+            prefs.edit().remove("cut_w_dp").remove("cut_h_dp").apply()
+            refreshers.forEach { it() }
+        })
+
         val autoStart = Switch(this).apply {
             this.text = "Jalankan otomatis saat HP menyala"
             isChecked = prefs.getBoolean("autostart", false)
