@@ -31,6 +31,7 @@ import android.text.TextUtils
 import android.view.ContextThemeWrapper
 import android.view.Gravity
 import android.view.View
+import android.view.WindowInsets
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.LinearLayout
@@ -57,7 +58,17 @@ class NotchService : Service() {
     private val match = ViewGroup.LayoutParams.MATCH_PARENT
 
     // ---- tampilan ----
-    private lateinit var collapsedText: TextView
+    private lateinit var header: LinearLayout
+    private lateinit var leftText: TextView
+    private lateinit var rightText: TextView
+    private lateinit var spacer: View
+    private lateinit var flashRow: TextView
+    private lateinit var pillBg: GradientDrawable
+    private var autoCutW = 0
+    private var autoCutH = 0
+    private var appliedW = -1
+    private var appliedH = -1
+    private var flashVisible = false
     private lateinit var expanded: LinearLayout
     private lateinit var pages: List<View>
     private lateinit var tabs: List<TextView>
@@ -94,6 +105,7 @@ class NotchService : Service() {
     private val autoCollapse = Runnable { setExpanded(false) }
     private val tick = object : Runnable {
         override fun run() {
+            applyGeometry()
             tickTimer()
             tickWaterReminder()
             refresh()
@@ -286,30 +298,45 @@ class NotchService : Service() {
         expanded = LinearLayout(ui).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
-            setPadding(0, dp(10), 0, dp(4))
+            setPadding(0, dp(4), 0, dp(4))
             pages.forEach { addView(it) }
             addView(row(*tabs.toTypedArray()))
         }
 
-        collapsedText = label("", 13f, bold = true).apply {
+        leftText = wingLabel()
+        rightText = wingLabel()
+        spacer = View(ui)
+        header = LinearLayout(ui).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(leftText, LinearLayout.LayoutParams(wrap, match))
+            addView(spacer, LinearLayout.LayoutParams(dp(44), match))
+            addView(rightText, LinearLayout.LayoutParams(wrap, match))
+        }
+
+        flashRow = label("", 13f, bold = true).apply {
             gravity = Gravity.CENTER
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
             maxWidth = dp(240)
-            minWidth = dp(56)
+            visibility = View.GONE
+            setPadding(dp(14), dp(2), dp(14), dp(2))
         }
+
+        pillBg = GradientDrawable().apply { setColor(Color.BLACK) }
 
         val root = LinearLayout(ui).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(16), dp(7), dp(16), dp(7))
-            background = GradientDrawable().apply {
-                setColor(Color.BLACK)
-                cornerRadius = dp(20).toFloat()
-            }
-            addView(collapsedText, LinearLayout.LayoutParams(wrap, wrap))
+            background = pillBg
+            addView(header, LinearLayout.LayoutParams(wrap, dp(30)))
+            addView(flashRow, LinearLayout.LayoutParams(wrap, wrap))
             addView(expanded, LinearLayout.LayoutParams(dp(280), wrap))
             setOnClickListener { setExpanded(!isExpanded) }
+            setOnApplyWindowInsetsListener { _, insets ->
+                readCutout(insets)
+                insets
+            }
         }
 
         val params = WindowManager.LayoutParams(
@@ -323,16 +350,27 @@ class NotchService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            y = dp(6)
-            if (Build.VERSION.SDK_INT >= 28) {
+            y = 0
+            if (Build.VERSION.SDK_INT >= 30) {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            } else if (Build.VERSION.SDK_INT >= 28) {
                 layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
         }
 
         showPage(0)
-        wm.addView(root, params)
         pill = root
+        wm.addView(root, params)
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                readCutout(wm.maximumWindowMetrics.windowInsets)
+            } catch (e: Exception) {
+            }
+        }
+        updateShape()
+        applyGeometry()
         handler.post(tick)
     }
 
@@ -343,6 +381,7 @@ class NotchService : Service() {
         expanded.visibility = if (e) View.VISIBLE else View.GONE
         handler.removeCallbacks(autoCollapse)
         if (e) handler.postDelayed(autoCollapse, 10_000)
+        updateShape()
         refresh()
     }
 
@@ -370,18 +409,88 @@ class NotchService : Service() {
         updateMusic()
         updateTimer()
         updateWater()
-        collapsedText.text = collapsedLabel()
+
+        val (l, r) = wings()
+        if (leftText.text.toString() != l || rightText.text.toString() != r) syncWings(l, r)
+
+        val f = flashText
+        val showFlash = !isExpanded && f != null && SystemClock.elapsedRealtime() < flashUntil
+        if (showFlash != flashVisible) {
+            flashVisible = showFlash
+            flashRow.visibility = if (showFlash) View.VISIBLE else View.GONE
+            updateShape()
+        }
+        if (showFlash) flashRow.text = f
     }
 
-    private fun clock(): String = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+    /** Isi sayap kiri dan kanan di sekitar kamera. Kosong saat tidak ada aktivitas. */
+    private fun wings(): Pair<String, String> {
+        if (timerRunning) return Pair("\u23F1", fmt(timerEndAt - SystemClock.elapsedRealtime()))
+        if (playing) return Pair("\u266A", "")
+        return Pair("", "")
+    }
 
-    private fun collapsedLabel(): String {
-        val f = flashText
-        if (f != null && SystemClock.elapsedRealtime() < flashUntil) return f
-        if (timerRunning) return "\u23F1 " + fmt(timerEndAt - SystemClock.elapsedRealtime())
-        val t = currentTitle
-        if (playing && !t.isNullOrBlank()) return "\u266A $t"
-        return clock()
+    private fun wingLabel() = label("", 12f, bold = true).apply {
+        gravity = Gravity.CENTER
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
+        maxWidth = dp(56)
+        minWidth = dp(10)
+        setPadding(dp(4), 0, dp(4), 0)
+    }
+
+    /** Sayap kiri dan kanan dibuat sama lebar supaya celah kamera tetap di tengah. */
+    private fun syncWings(l: String, r: String) {
+        leftText.text = l
+        rightText.text = r
+        val base = if (l.isEmpty() && r.isEmpty()) dp(10) else dp(40)
+        leftText.minWidth = 0
+        rightText.minWidth = 0
+        val spec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        leftText.measure(spec, spec)
+        rightText.measure(spec, spec)
+        val w = maxOf(base, leftText.measuredWidth, rightText.measuredWidth)
+        leftText.minWidth = w
+        rightText.minWidth = w
+    }
+
+    // ---------- bentuk & posisi ----------
+
+    /** Menempel di tepi atas: sudut atas lurus, sudut bawah membulat. */
+    private fun updateShape() {
+        val r = dp(if (isExpanded) 26 else if (flashVisible) 20 else 14).toFloat()
+        pillBg.cornerRadii = floatArrayOf(0f, 0f, 0f, 0f, r, r, r, r)
+        pill?.let {
+            it.minimumWidth = if (isExpanded) dp(312) else 0
+            it.setPadding(dp(4), 0, dp(4), if (isExpanded || flashVisible) dp(10) else 0)
+        }
+    }
+
+    private fun readCutout(insets: WindowInsets?) {
+        val cut = insets?.displayCutout ?: return
+        val r = cut.boundingRects.filter { it.top <= dp(2) }.maxByOrNull { it.width() } ?: return
+        val h = maxOf(r.bottom, cut.safeInsetTop)
+        if (r.width() != autoCutW || h != autoCutH) {
+            autoCutW = r.width()
+            autoCutH = h
+            handler.post { applyGeometry() }
+        }
+    }
+
+    /** Lebar celah kamera dan tinggi baris atas. Pengaturan manual menang atas deteksi otomatis. */
+    private fun applyGeometry() {
+        if (pill == null) return
+        val mw = prefs.getInt("cut_w_dp", 0)
+        val mh = prefs.getInt("cut_h_dp", 0)
+        val w = if (mw > 0) dp(mw) else if (autoCutW > 0) autoCutW + dp(6) else dp(44)
+        val h = if (mh > 0) dp(mh)
+        else if (autoCutH > 0) (autoCutH + dp(2)).coerceIn(dp(26), dp(44))
+        else dp(30)
+        if (w == appliedW && h == appliedH) return
+        appliedW = w
+        appliedH = h
+        spacer.layoutParams = LinearLayout.LayoutParams(w, match)
+        header.layoutParams = LinearLayout.LayoutParams(wrap, h)
     }
 
     // ---------- musik ----------
